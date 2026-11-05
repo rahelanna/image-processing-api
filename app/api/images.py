@@ -5,6 +5,8 @@ import shutil
 from fastapi import APIRouter, HTTPException, File, UploadFile, status
 from PIL import Image
 
+from app.image_processing.metadata import extract_metadata
+
 
 images_router = APIRouter()
 MAX_FILE_SIZE = 25 * 1024 * 1024
@@ -57,6 +59,7 @@ def upload_image(file: UploadFile = File(...)):
         with storage_path.open(mode="xb") as destination:
             file_created = True
             shutil.copyfileobj(file.file, destination, length=1024*1024)
+        metadata = extract_metadata(storage_path)
     except OSError:
         if file_created:
             try:
@@ -69,4 +72,5 @@ def upload_image(file: UploadFile = File(...)):
         "image_id": image_id,
         "original_filename": file.filename,
         "stored_filename": stored_filename,
+        "metadata": metadata,
     }
