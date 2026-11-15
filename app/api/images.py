@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 import shutil
+import logging
 
 from fastapi import APIRouter, HTTPException, File, UploadFile, status
 from PIL import Image
@@ -9,6 +10,8 @@ from app.image_processing.metadata import extract_metadata
 
 
 images_router = APIRouter()
+logger = logging.getLogger(__name__)
+
 MAX_FILE_SIZE = 25 * 1024 * 1024
 STORAGE_DIR = Path("storage/originals")
 
@@ -25,8 +28,15 @@ EXTENSIONS = {
     "WEBP": ".webp",
 }
 
+def cleanup_file(file_path: Path) -> None:
+    try:
+        file_path.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("Failed to delete file: %s", file_path)
+
 @images_router.post("/images", status_code=status.HTTP_201_CREATED)
 def upload_image(file: UploadFile = File(...)):
+
     if file.content_type not in allowed_formats:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type")
 
@@ -59,15 +69,18 @@ def upload_image(file: UploadFile = File(...)):
         with storage_path.open(mode="xb") as destination:
             file_created = True
             shutil.copyfileobj(file.file, destination, length=1024*1024)
-        metadata = extract_metadata(storage_path)
     except OSError:
+        logger.exception("Failed to save image: %s", storage_path)
         if file_created:
-            try:
-                storage_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            cleanup_file(storage_path)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save image")
 
+    try:
+        metadata = extract_metadata(storage_path)
+    except Exception as exc:
+        logger.exception("Failed to extract metadata: %s", storage_path)
+        cleanup_file(storage_path)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to extract image metadata")
     return {
         "image_id": image_id,
         "original_filename": file.filename,
