@@ -1,12 +1,16 @@
 from pathlib import Path
-from uuid import uuid4
+from uuid import uuid4, UUID
 import shutil
 import logging
 
-from fastapi import APIRouter, HTTPException, File, UploadFile, status
+from fastapi import APIRouter, HTTPException, File, UploadFile, status, Depends
 from PIL import Image
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.image_processing.metadata import extract_metadata
+from app.database import get_db
+from app.models.image import Image as ImageModel
 
 
 images_router = APIRouter()
@@ -35,7 +39,10 @@ def cleanup_file(file_path: Path) -> None:
         logger.exception("Failed to delete file: %s", file_path)
 
 @images_router.post("/images", status_code=status.HTTP_201_CREATED)
-def upload_image(file: UploadFile = File(...)):
+def upload_image(
+        file: UploadFile = File(...),
+        db: Session = Depends(get_db),
+):
 
     if file.content_type not in allowed_formats:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type")
@@ -77,10 +84,32 @@ def upload_image(file: UploadFile = File(...)):
 
     try:
         metadata = extract_metadata(storage_path)
-    except Exception as exc:
+        image_record = ImageModel(
+            id=UUID(image_id),
+            original_filename=file.filename,
+            stored_filename=stored_filename,
+            width=metadata["width"],
+            height=metadata["height"],
+            format=metadata["format"],
+            file_size=metadata["file_size"],
+            captured_at=metadata["captured_at"],
+            camera_make=metadata["camera_make"],
+            camera_model=metadata["camera_model"],
+            software=metadata["software"],
+            orientation=metadata["orientation"],
+        )
+    except Exception:
         logger.exception("Failed to extract metadata: %s", storage_path)
         cleanup_file(storage_path)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to extract image metadata")
+    try:
+        db.add(image_record)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to save image record: %s", storage_path)
+        db.rollback()
+        cleanup_file(storage_path)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save image record")
     return {
         "image_id": image_id,
         "original_filename": file.filename,

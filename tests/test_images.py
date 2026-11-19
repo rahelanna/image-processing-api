@@ -5,9 +5,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from uuid import UUID
 
 from app.main import app
 import app.api.images as images_module
+from app.models.image import Image as ImageModel
 
 
 client = TestClient(app)
@@ -38,7 +43,7 @@ def test_upload_invalid_image() -> None:
     assert response.json() == {"detail": "Invalid image file"}
 
 
-def test_upload_valid_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_valid_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_database: Engine) -> None:
     monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
     image = Image.new("RGB", (10, 10), color="red")
     buffer = BytesIO()
@@ -59,6 +64,14 @@ def test_upload_valid_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert stored_file.exists()
     assert "image_id" in payload
     assert payload["metadata"]["file_size"] > 0
+
+    with Session(test_database) as session:
+        stored_image = session.get(ImageModel, UUID(payload["image_id"]))
+
+        assert stored_image is not None
+        assert stored_image.original_filename == "test.png"
+        assert stored_image.width == 10
+        assert stored_image.height == 10
 
 
 
@@ -139,3 +152,26 @@ def test_upload_partial_write_failure(
     payload = response.json()
     assert payload == {"detail": "Failed to save image"}
     assert list(tmp_path.iterdir()) == []
+
+
+def test_upload_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_commit(self: Session) -> None:
+        raise SQLAlchemyError("Simulated database failure")
+    monkeypatch.setattr(Session, "commit", failing_commit)
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload == {"detail": "Failed to save image record"}
+    assert list(tmp_path.iterdir()) == []
+    
