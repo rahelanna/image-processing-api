@@ -174,4 +174,27 @@ def test_upload_database_failure(
     payload = response.json()
     assert payload == {"detail": "Failed to save image record"}
     assert list(tmp_path.iterdir()) == []
-    
+
+
+def test_get_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+
+    get_response = client.get("/images")
+    assert get_response.status_code == 200
+    images = get_response.json()
+    assert len(images) == 1
+    assert images[0]["original_filename"] == "test.png"
+    assert images[0]["width"] == 10
+    assert images[0]["height"] == 10
+    assert images[0]["id"] == post_response.json()["image_id"]

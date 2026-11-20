@@ -7,10 +7,12 @@ from fastapi import APIRouter, HTTPException, File, UploadFile, status, Depends
 from PIL import Image
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select
 
 from app.image_processing.metadata import extract_metadata
 from app.database import get_db
 from app.models.image import Image as ImageModel
+from app.schemas.image import ImageResponse
 
 
 images_router = APIRouter()
@@ -116,3 +118,12 @@ def upload_image(
         "stored_filename": stored_filename,
         "metadata": metadata,
     }
+
+
+@images_router.get("/images", response_model=list[ImageResponse])
+def get_images(db: Session = Depends(get_db)):
+    statement = select(ImageModel)
+
+    return db.scalars(statement).all()
+
+
