@@ -127,3 +127,9 @@ def get_images(db: Session = Depends(get_db)):
     return db.scalars(statement).all()
 
 
+@images_router.get("/images/{image_id}", response_model=ImageResponse)
+def get_image(image_id: UUID, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return image

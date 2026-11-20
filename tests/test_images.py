@@ -198,3 +198,43 @@ def test_get_images(
     assert images[0]["width"] == 10
     assert images[0]["height"] == 10
     assert images[0]["id"] == post_response.json()["image_id"]
+
+
+def test_get_image_by_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    image_id = post_response.json()["image_id"]
+    assert post_response.status_code == 201
+
+
+    get_response = client.get(f"/images/{image_id}")
+    assert get_response.status_code == 200
+    image_data = get_response.json()
+    assert image_data["id"] == image_id
+    assert image_data["original_filename"] == "test.png"
+    assert image_data["width"] == 10
+    assert image_data["height"] == 10
+
+
+def test_get_image_not_found() -> None:
+    response = client.get("/images/00000000-0000-4000-8000-000000000000")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Image not found"}
+
+
+def test_get_invalid_uuid() -> None:
+    response = client.get("/images/456")
+    assert response.status_code == 422
+    assert "detail" in response.json()
+
+
