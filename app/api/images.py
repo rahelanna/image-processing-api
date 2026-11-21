@@ -133,3 +133,34 @@ def get_image(image_id: UUID, db: Session = Depends(get_db)):
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
     return image
+
+
+@images_router.delete(
+    "/images/{image_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_image(image_id: UUID, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    storage_path = STORAGE_DIR / image.stored_filename
+    temporary_path = STORAGE_DIR / (image.stored_filename + ".deleting")
+    try:
+        storage_path.rename(temporary_path)
+    except OSError:
+        logger.exception("Failed to prepare image deletion: %s", temporary_path)
+        raise HTTPException(status_code=500, detail="Failed to prepare image deletion")
+
+    try:
+        db.delete(image)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to delete image record: %s", id)
+        db.rollback()
+        try:
+            temporary_path.rename(storage_path)
+        except OSError:
+            logger.exception("Failed to rename image: %s", temporary_path)
+        raise HTTPException(status_code=500, detail="Failed to delete image record")
+
+    cleanup_file(temporary_path)

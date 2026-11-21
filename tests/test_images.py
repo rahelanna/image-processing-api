@@ -238,3 +238,69 @@ def test_get_invalid_uuid() -> None:
     assert "detail" in response.json()
 
 
+def test_delete_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+
+    assert post_response.status_code == 201
+    image_data = post_response.json()
+    image_id = image_data["image_id"]
+    stored_file = tmp_path / image_data["stored_filename"]
+    assert stored_file.exists()
+
+    delete_response = client.delete(f"/images/{image_id}")
+    assert delete_response.status_code == 204
+    assert delete_response.content == b""
+    assert list(tmp_path.iterdir()) == []
+
+    get_response = client.get(f"/images/{image_id}")
+    assert get_response.status_code == 404
+    assert get_response.json() == {"detail": "Image not found"}
+
+
+def test_delete_image_not_found() -> None:
+    response = client.delete("/images/00000000-0000-4000-8000-000000000000")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Image not found"}
+
+
+def test_delete_image_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    image_data = post_response.json()
+    image_id = image_data["image_id"]
+    stored_file = tmp_path / image_data["stored_filename"]
+
+    assert stored_file.exists()
+
+    def failing_commit(self: Session) -> None:
+        raise SQLAlchemyError("Simulated database failure")
+
+    monkeypatch.setattr(Session, "commit", failing_commit)
+    response = client.delete(f"/images/{image_id}")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to delete image record"}
+    assert stored_file.exists()
+    assert list(tmp_path.iterdir()) == [stored_file]
+
+    get_response = client.get(f"/images/{image_id}")
+    assert get_response.status_code == 200
+
