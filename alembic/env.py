@@ -8,6 +8,7 @@ from alembic import context
 from app.database import database_url
 from app.models.base import Base
 from app.models.image import Image
+from app.models.processed_image import ProcessedImage
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
