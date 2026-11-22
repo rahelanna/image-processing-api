@@ -12,7 +12,9 @@ from uuid import UUID
 
 from app.main import app
 import app.api.images as images_module
+from app.models import processed_image
 from app.models.image import Image as ImageModel
+from app.models.processed_image import ProcessedImage
 
 
 client = TestClient(app)
@@ -241,8 +243,13 @@ def test_get_invalid_uuid() -> None:
 def test_delete_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    test_database: Engine
 ) -> None:
-    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+
     image = Image.new("RGB", (10, 10), color="red")
     buffer = BytesIO()
     image.save(buffer, format="PNG")
@@ -254,17 +261,63 @@ def test_delete_image(
     assert post_response.status_code == 201
     image_data = post_response.json()
     image_id = image_data["image_id"]
-    stored_file = tmp_path / image_data["stored_filename"]
+    stored_file = originals_dir / image_data["stored_filename"]
     assert stored_file.exists()
+
+    resize_response_0 = client.post(
+        f"/images/{image_id}/resize",
+        json={"width": 50, "height": 50},
+    )
+    assert resize_response_0.status_code == 201
+    resized_image_0 = processed_dir / resize_response_0.json()["stored_filename"]
+    assert resized_image_0.exists()
+
+    resized_responde_1 = client.post(
+        f"/images/{image_id}/resize",
+        json={"width": 25, "height": 25},
+    )
+    assert resized_responde_1.status_code == 201
+    resized_image_1 = processed_dir / resized_responde_1.json()["stored_filename"]
+    assert resized_image_1.exists()
+
+    resized_id_0 = resize_response_0.json()["id"]
+    resized_id_1 = resized_responde_1.json()["id"]
 
     delete_response = client.delete(f"/images/{image_id}")
     assert delete_response.status_code == 204
     assert delete_response.content == b""
-    assert list(tmp_path.iterdir()) == []
+    assert list(originals_dir.iterdir()) == []
+    assert list(processed_dir.iterdir()) == []
 
     get_response = client.get(f"/images/{image_id}")
     assert get_response.status_code == 404
     assert get_response.json() == {"detail": "Image not found"}
+
+    with Session(test_database) as session:
+        assert session.get(ProcessedImage, UUID(resized_id_0)) is None
+        assert session.get(ProcessedImage, UUID(resized_id_1)) is None
+
+
+def test_delete_image_without_processed_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(images_module, "STORAGE_DIR", tmp_path)
+    image = Image.new("RGB", (10, 10), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    image_id = post_response.json()["image_id"]
+    delete_response = client.delete(f"/images/{image_id}")
+    assert delete_response.status_code == 204
+    assert list(tmp_path.iterdir()) == []
+    get_response = client.get(f"/images/{image_id}")
+    assert get_response.status_code == 404
+    assert delete_response.content == b""
 
 
 def test_delete_image_not_found() -> None:
@@ -304,3 +357,115 @@ def test_delete_image_database_failure(
     get_response = client.get(f"/images/{image_id}")
     assert get_response.status_code == 200
 
+
+def test_resize_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    test_database: Engine,
+) -> None:
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    source_image_id = post_response.json()["image_id"]
+    original_filename = post_response.json()["stored_filename"]
+    original_file = originals_dir / original_filename
+
+    resize_response = client.post(
+        f"/images/{source_image_id}/resize",
+        json={"width": 50, "height": 30},
+    )
+    assert resize_response.status_code == 201
+    resized_data = resize_response.json()
+    resized_image_id = resized_data["id"]
+
+    processed_file = processed_dir / resized_data["stored_filename"]
+
+    assert processed_file.exists()
+
+    with Image.open(processed_file) as resized_image:
+        assert resized_image.size == (50, 30)
+        assert resized_data["source_image_id"] == source_image_id
+
+    with Session(test_database) as session:
+        processed_record = session.get(ProcessedImage, UUID(resized_image_id))
+
+        assert processed_record is not None
+        assert processed_record.source_image_id == UUID(source_image_id)
+        assert processed_record.width == 50
+        assert processed_record.height == 30
+
+    assert original_file.exists()
+
+    with Image.open(original_file) as original_image:
+        assert original_image.size == (100, 100)
+
+
+def test_resize_image_not_found() -> None:
+    response = client.post(
+        "/images/00000000-0000-4000-8000-000000000000/resize",
+        json= {"width": 50, "height": 30}
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Image not found"}
+
+
+@pytest.mark.parametrize(
+    "width, height",
+    [
+        (0, 100),
+        (100, -5),
+        (8001, 100),
+        (100, 8001),
+    ],
+)
+def test_resize_image_invalid_dimensions(width: int, height: int) -> None:
+    post_response = client.post(
+        "/images/00000000-0000-4000-8000-000000000000/resize",
+        json= {"width": width, "height": height}
+    )
+    assert post_response.status_code == 422
+    assert "detail" in post_response.json()
+
+
+def test_resize_image_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    image_id = post_response.json()["image_id"]
+    stored_file = originals_dir / post_response.json()["stored_filename"]
+
+    def failing_commit(self: Session) -> None:
+        raise SQLAlchemyError("Simulated database failure")
+    monkeypatch.setattr(Session, "commit", failing_commit)
+
+    resized_response = client.post(
+        f"/images/{image_id}/resize",
+        json={"width": 50, "height": 30},
+    )
+    assert resized_response.status_code == 500
+    assert resized_response.json() == {"detail": "Failed to save processed image record"}
+    assert list(processed_dir.iterdir()) == []
+    assert stored_file.exists()

@@ -10,6 +10,7 @@ from app.database import get_db
 from app.main import app
 from app.models.base import Base
 from app.models.image import Image
+from app.models.processed_image import ProcessedImage
 
 
 @pytest.fixture(autouse=True)

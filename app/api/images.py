@@ -13,6 +13,9 @@ from app.image_processing.metadata import extract_metadata
 from app.database import get_db
 from app.models.image import Image as ImageModel
 from app.schemas.image import ImageResponse
+from app.schemas.resize import ResizeRequest, ResizeResponse
+from app.image_processing.resize import resize_image
+from app.models.processed_image import ProcessedImage
 
 
 images_router = APIRouter()
@@ -20,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 25 * 1024 * 1024
 STORAGE_DIR = Path("storage/originals")
+PROCESSED_DIR = Path("storage/processed")
 
 
 allowed_formats = {
@@ -144,23 +148,109 @@ def delete_image(image_id: UUID, db: Session = Depends(get_db)):
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
     storage_path = STORAGE_DIR / image.stored_filename
-    temporary_path = STORAGE_DIR / (image.stored_filename + ".deleting")
-    try:
-        storage_path.rename(temporary_path)
-    except OSError:
-        logger.exception("Failed to prepare image deletion: %s", temporary_path)
-        raise HTTPException(status_code=500, detail="Failed to prepare image deletion")
+
+    statement = select(ProcessedImage).where(
+        ProcessedImage.source_image_id == image_id
+    )
+    processed_images = db.scalars(statement).all()
+
+    processed_paths = [
+        PROCESSED_DIR / processed_image.stored_filename
+        for processed_image in processed_images
+    ]
+
+    all_paths = [storage_path, *processed_paths]
+
+    file_pairs = [
+        (path, path.with_name(path.name + ".deleting"))
+        for path in all_paths
+    ]
+
+    renamed_files: list[tuple[Path, Path]] = []
 
     try:
+        for original_path, temporary_path in file_pairs:
+            original_path.rename(temporary_path)
+            renamed_files.append((original_path, temporary_path))
+
+    except OSError:
+        logger.exception("Failed to prepare image deletion: %s", image_id)
+
+        for original_path, temporary_path in reversed(renamed_files):
+            try:
+                temporary_path.rename(original_path)
+            except OSError:
+                logger.exception("Failed to restore image file: %s", temporary_path)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to prepare image deletion",
+        )
+
+    try:
+        for processed_image in processed_images:
+            db.delete(processed_image)
         db.delete(image)
         db.commit()
     except SQLAlchemyError:
-        logger.exception("Failed to delete image record: %s", id)
+        logger.exception("Failed to delete image record: %s", image_id)
         db.rollback()
-        try:
-            temporary_path.rename(storage_path)
-        except OSError:
-            logger.exception("Failed to rename image: %s", temporary_path)
+        for original_path, temporary_path in reversed(renamed_files):
+            try:
+                temporary_path.rename(original_path)
+            except OSError:
+                logger.exception("Failed to restore image file: %s", temporary_path)
         raise HTTPException(status_code=500, detail="Failed to delete image record")
 
-    cleanup_file(temporary_path)
+    for _, temporary_path in renamed_files:
+        cleanup_file(temporary_path)
+
+
+@images_router.post("/images/{image_id}/resize", response_model=ResizeResponse, status_code=status.HTTP_201_CREATED)
+def resize_image_endpoint(image_id: UUID, request: ResizeRequest, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    source_path = STORAGE_DIR / image.stored_filename
+    extension = source_path.suffix
+    processed_id = str(uuid4())
+
+    image_path = PROCESSED_DIR / f"{processed_id}{extension}"
+
+    try:
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        resize_image(source_path, image_path, request.width, request.height)
+    except OSError:
+        logger.exception("Failed to resize image: %s", image_path)
+        cleanup_file(image_path)
+        raise HTTPException(status_code=500, detail="Failed to resize image")
+
+    try:
+        processed_record = ProcessedImage(
+            id=UUID(processed_id),
+            source_image_id=image_id,
+            stored_filename=image_path.name,
+            width=request.width,
+            height=request.height,
+            format=image.format,
+            file_size=image_path.stat().st_size,
+        )
+    except OSError:
+        logger.exception("Failed to created processed image record: %s", image_path)
+        cleanup_file(image_path)
+        raise HTTPException(status_code=500, detail="Failed to create processed image record")
+
+    try:
+        db.add(processed_record)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to save processed image record: %s", image_path)
+        db.rollback()
+        cleanup_file(image_path)
+        raise HTTPException(status_code=500, detail="Failed to save processed image record")
+
+    return processed_record
+
+
+
