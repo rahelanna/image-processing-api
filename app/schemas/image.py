@@ -15,3 +15,17 @@ class ImageResponse(BaseModel):
     format: str
     file_size: int
     created_at: datetime
+
+
+class ProcessedImageResponse(BaseModel):
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    source_image_id: UUID
+    stored_filename: str
+    width: int
+    height: int
+    format: str
+    file_size: int
+    created_at: datetime

@@ -12,11 +12,12 @@ from sqlalchemy import select
 from app.image_processing.metadata import extract_metadata
 from app.database import get_db
 from app.models.image import Image as ImageModel
-from app.schemas.image import ImageResponse
-from app.schemas.resize import ResizeRequest, ResizeResponse
+from app.schemas.image import ImageResponse, ProcessedImageResponse
+from app.schemas.resize import ResizeRequest
 from app.image_processing.resize import resize_image
 from app.models.processed_image import ProcessedImage
-
+from app.schemas.rotate import RotateRequest
+from app.image_processing.rotate import rotate_image
 
 images_router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ def delete_image(image_id: UUID, db: Session = Depends(get_db)):
         cleanup_file(temporary_path)
 
 
-@images_router.post("/images/{image_id}/resize", response_model=ResizeResponse, status_code=status.HTTP_201_CREATED)
+@images_router.post("/images/{image_id}/resize", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED)
 def resize_image_endpoint(image_id: UUID, request: ResizeRequest, db: Session = Depends(get_db)):
     image = db.get(ImageModel, image_id)
     if image is None:
@@ -221,25 +222,21 @@ def resize_image_endpoint(image_id: UUID, request: ResizeRequest, db: Session = 
     try:
         PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         resize_image(source_path, image_path, request.width, request.height)
+        file_size = image_path.stat().st_size
     except OSError:
         logger.exception("Failed to resize image: %s", image_path)
         cleanup_file(image_path)
         raise HTTPException(status_code=500, detail="Failed to resize image")
 
-    try:
-        processed_record = ProcessedImage(
-            id=UUID(processed_id),
-            source_image_id=image_id,
-            stored_filename=image_path.name,
-            width=request.width,
-            height=request.height,
-            format=image.format,
-            file_size=image_path.stat().st_size,
-        )
-    except OSError:
-        logger.exception("Failed to created processed image record: %s", image_path)
-        cleanup_file(image_path)
-        raise HTTPException(status_code=500, detail="Failed to create processed image record")
+    processed_record = ProcessedImage(
+        id=UUID(processed_id),
+        source_image_id=image_id,
+        stored_filename=image_path.name,
+        width=request.width,
+        height=request.height,
+        format=image.format,
+        file_size=file_size,
+    )
 
     try:
         db.add(processed_record)
@@ -253,4 +250,45 @@ def resize_image_endpoint(image_id: UUID, request: ResizeRequest, db: Session = 
     return processed_record
 
 
+@images_router.post(
+    "/images/{image_id}/rotate", status_code=status.HTTP_201_CREATED, response_model=ProcessedImageResponse)
+def rotate_image_endpoint(image_id: UUID, request: RotateRequest, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    source_path = STORAGE_DIR / image.stored_filename
+    extension = source_path.suffix
+    processed_id = str(uuid4())
+    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
+
+    try:
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        width, height = rotate_image(source_path, output_path, request.angle)
+        file_size = output_path.stat().st_size
+    except OSError:
+        logger.exception("Failed to rotate image: %s", output_path)
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to rotate image")
+
+    processed_record = ProcessedImage(
+        id=UUID(processed_id),
+        source_image_id=image_id,
+        stored_filename=output_path.name,
+        width=width,
+        height=height,
+        format=image.format,
+        file_size=file_size,
+    )
+
+    try:
+        db.add(processed_record)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to save processed image record: %s", output_path)
+        db.rollback()
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to save processed image record")
+
+    return processed_record
 

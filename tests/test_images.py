@@ -76,9 +76,6 @@ def test_upload_valid_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tes
         assert stored_image.height == 10
 
 
-
-
-
 def test_upload_metadata_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -272,16 +269,16 @@ def test_delete_image(
     resized_image_0 = processed_dir / resize_response_0.json()["stored_filename"]
     assert resized_image_0.exists()
 
-    resized_responde_1 = client.post(
+    resized_respond_1 = client.post(
         f"/images/{image_id}/resize",
         json={"width": 25, "height": 25},
     )
-    assert resized_responde_1.status_code == 201
-    resized_image_1 = processed_dir / resized_responde_1.json()["stored_filename"]
+    assert resized_respond_1.status_code == 201
+    resized_image_1 = processed_dir / resized_respond_1.json()["stored_filename"]
     assert resized_image_1.exists()
 
     resized_id_0 = resize_response_0.json()["id"]
-    resized_id_1 = resized_responde_1.json()["id"]
+    resized_id_1 = resized_respond_1.json()["id"]
 
     delete_response = client.delete(f"/images/{image_id}")
     assert delete_response.status_code == 204
@@ -358,17 +355,26 @@ def test_delete_image_database_failure(
     assert get_response.status_code == 200
 
 
-def test_resize_image(
+@pytest.mark.parametrize(
+    "operation, payload",
+    [
+        ("resize", {"width": 50, "height": 30}),
+        ("rotate", {"angle": 90}),
+    ]
+)
+def test_process_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     test_database: Engine,
+    operation: str,
+    payload: dict[str, int],
 ) -> None:
     originals_dir = tmp_path / "originals"
     processed_dir = tmp_path / "processed"
     monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
     monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
 
-    image = Image.new("RGB", (100, 100), color="red")
+    image = Image.new("RGB", (100, 60), color="red")
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     post_response = client.post(
@@ -377,43 +383,58 @@ def test_resize_image(
     )
     assert post_response.status_code == 201
     source_image_id = post_response.json()["image_id"]
-    original_filename = post_response.json()["stored_filename"]
-    original_file = originals_dir / original_filename
+    stored_filename = post_response.json()["stored_filename"]
+    original_file = originals_dir / stored_filename
 
-    resize_response = client.post(
-        f"/images/{source_image_id}/resize",
-        json={"width": 50, "height": 30},
+    processed_response = client.post(
+        f"/images/{source_image_id}/{operation}",
+        json=payload,
     )
-    assert resize_response.status_code == 201
-    resized_data = resize_response.json()
-    resized_image_id = resized_data["id"]
+    assert processed_response.status_code == 201
+    processed_data = processed_response.json()
+    processed_image_id = processed_data["id"]
 
-    processed_file = processed_dir / resized_data["stored_filename"]
+    processed_file = processed_dir / processed_data["stored_filename"]
 
     assert processed_file.exists()
 
-    with Image.open(processed_file) as resized_image:
-        assert resized_image.size == (50, 30)
-        assert resized_data["source_image_id"] == source_image_id
+    with Image.open(processed_file) as processed_image:
+        if operation == "resize":
+            assert processed_image.size == (50, 30)
+        elif operation == "rotate":
+            assert processed_image.size == (60, 100)
+
+    assert processed_data["source_image_id"] == source_image_id
 
     with Session(test_database) as session:
-        processed_record = session.get(ProcessedImage, UUID(resized_image_id))
+        processed_record = session.get(ProcessedImage, UUID(processed_image_id))
 
         assert processed_record is not None
         assert processed_record.source_image_id == UUID(source_image_id)
-        assert processed_record.width == 50
-        assert processed_record.height == 30
+        if operation == "resize":
+            assert processed_record.width == 50
+            assert processed_record.height == 30
+        elif operation == "rotate":
+            assert processed_record.width == 60
+            assert processed_record.height == 100
 
     assert original_file.exists()
 
     with Image.open(original_file) as original_image:
-        assert original_image.size == (100, 100)
+        assert original_image.size == (100, 60)
 
-
-def test_resize_image_not_found() -> None:
+@pytest.mark.parametrize(
+    "operation, payload",
+    [
+        ("resize", {"width": 50, "height": 30}),
+        ("rotate", {"angle": 90}),
+    ]
+)
+def test_processing_image_not_found(operation:str, payload: dict[str, int]) -> None:
     response = client.post(
-        "/images/00000000-0000-4000-8000-000000000000/resize",
-        json= {"width": 50, "height": 30}
+        f"/images/00000000-0000-4000-8000-000000000000/{operation}",
+        json=payload
+
     )
     assert response.status_code == 404
     assert response.json() == {"detail": "Image not found"}
@@ -437,9 +458,27 @@ def test_resize_image_invalid_dimensions(width: int, height: int) -> None:
     assert "detail" in post_response.json()
 
 
-def test_resize_image_database_failure(
+def test_rotate_image_invalid_angle() -> None:
+    post_response = client.post(
+        "/images/00000000-0000-4000-8000-000000000000/rotate",
+        json= {"angle": -90}
+    )
+    assert post_response.status_code == 422
+    assert "detail" in post_response.json()
+
+
+@pytest.mark.parametrize(
+    "operation, payload",
+    [
+        ("resize", {"width": 50, "height": 30}),
+        ("rotate", {"angle": 90}),
+    ]
+)
+def test_process_image_database_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    payload: dict[str, int],
 ) -> None:
     originals_dir = tmp_path / "originals"
     processed_dir = tmp_path / "processed"
@@ -462,8 +501,8 @@ def test_resize_image_database_failure(
     monkeypatch.setattr(Session, "commit", failing_commit)
 
     resized_response = client.post(
-        f"/images/{image_id}/resize",
-        json={"width": 50, "height": 30},
+        f"/images/{image_id}/{operation}",
+        json=payload,
     )
     assert resized_response.status_code == 500
     assert resized_response.json() == {"detail": "Failed to save processed image record"}
