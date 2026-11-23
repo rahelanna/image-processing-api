@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.image_processing.metadata import extract_metadata
 from app.database import get_db
 from app.models.image import Image as ImageModel
+from app.schemas.crop import CropRequest
 from app.schemas.image import ImageResponse, ProcessedImageResponse
 from app.schemas.resize import ResizeRequest
 from app.image_processing.resize import resize_image
@@ -19,6 +20,7 @@ from app.models.processed_image import ProcessedImage
 from app.schemas.rotate import RotateRequest
 from app.image_processing.rotate import rotate_image
 from app.image_processing.grayscale import grayscale_image
+from app.image_processing.crop import crop_image
 
 images_router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -336,3 +338,51 @@ def grayscale_image_endpoint(image_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Failed to save processed image record")
 
     return processed_record
+
+
+@images_router.post(
+    "/images/{image_id}/crop", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED
+)
+def crop_image_endpoint(image_id: UUID, request: CropRequest, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    source_path = STORAGE_DIR / image.stored_filename
+    extension = source_path.suffix
+    processed_id = str(uuid4())
+    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
+    try:
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        crop_image(source_path, output_path, request.top, request.left, request.width, request.height)
+        file_size = output_path.stat().st_size
+    except OSError:
+        logger.exception("Failed to crop image: %s", output_path)
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to crop image")
+    except ValueError as exc:
+        logger.exception("Failed to crop image: %s", output_path)
+        cleanup_file(output_path)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    processed_record = ProcessedImage(
+        id=UUID(processed_id),
+        source_image_id=image_id,
+        stored_filename=output_path.name,
+        width=request.width,
+        height=request.height,
+        format=image.format,
+        file_size=file_size,
+    )
+
+    try:
+        db.add(processed_record)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to save processed image record: %s", output_path)
+        db.rollback()
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to save processed image record")
+
+    return processed_record
+

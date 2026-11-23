@@ -1,3 +1,4 @@
+import io
 from io import BytesIO
 from typing import BinaryIO
 from pathlib import Path
@@ -360,7 +361,8 @@ def test_delete_image_database_failure(
     [
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
-        ("grayscale", None)
+        ("grayscale", None),
+        ("crop", {"left": 10, "top": 5, "width": 40, "height": 30}),
     ]
 )
 def test_process_image(
@@ -404,9 +406,11 @@ def test_process_image(
             assert processed_image.size == (50, 30)
         if operation == "rotate":
             assert processed_image.size == (60, 100)
-        elif operation == "grayscale":
+        if operation == "grayscale":
             assert processed_image.size == (100, 60)
             assert processed_image.mode == "L"
+        elif operation == "crop":
+            assert processed_image.size == (40, 30)
 
     assert processed_data["source_image_id"] == source_image_id
 
@@ -418,9 +422,12 @@ def test_process_image(
         if operation == "resize":
             assert processed_record.width == 50
             assert processed_record.height == 30
-        elif operation == "rotate":
+        if operation == "rotate":
             assert processed_record.width == 60
             assert processed_record.height == 100
+        elif operation == "crop":
+            assert processed_record.width == 40
+            assert processed_record.height == 30
 
     assert original_file.exists()
 
@@ -433,6 +440,7 @@ def test_process_image(
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
         ("grayscale", None),
+        ("crop", {"left": 10, "top": 5, "width": 40, "height": 30})
     ]
 )
 def test_processing_image_not_found(operation:str, payload: dict[str, int] | None) -> None:
@@ -466,10 +474,42 @@ def test_resize_image_invalid_dimensions(width: int, height: int) -> None:
 def test_rotate_image_invalid_angle() -> None:
     post_response = client.post(
         "/images/00000000-0000-4000-8000-000000000000/rotate",
-        json= {"angle": -90}
+        json={"angle": -90}
     )
     assert post_response.status_code == 422
     assert "detail" in post_response.json()
+
+
+def test_crop_image_out_of_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+
+    image = Image.new("RGB", (100, 60), color="red")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")}
+    )
+    assert post_response.status_code == 201
+    source_image_id = post_response.json()["image_id"]
+    stored_filename = post_response.json()["stored_filename"]
+    original_file = originals_dir / stored_filename
+    assert original_file.exists()
+
+    crop_response = client.post(
+        f"/images/{source_image_id}/crop",
+         json={"left": 80, "top": 10, "width": 40, "height": 30}
+    )
+
+    assert crop_response.status_code == 422
+    assert crop_response.json() == {"detail": "Crop area exceeds image boundaries"}
+    assert not any(processed_dir.iterdir())
+
+
 
 
 @pytest.mark.parametrize(
@@ -478,6 +518,7 @@ def test_rotate_image_invalid_angle() -> None:
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
         ("grayscale", None),
+        ("crop", {"left": 10, "top": 5, "width": 40, "height": 30})
     ]
 )
 def test_process_image_database_failure(
