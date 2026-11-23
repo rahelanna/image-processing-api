@@ -360,6 +360,7 @@ def test_delete_image_database_failure(
     [
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
+        ("grayscale", None)
     ]
 )
 def test_process_image(
@@ -367,7 +368,7 @@ def test_process_image(
     monkeypatch: pytest.MonkeyPatch,
     test_database: Engine,
     operation: str,
-    payload: dict[str, int],
+    payload: dict[str, int] | None,
 ) -> None:
     originals_dir = tmp_path / "originals"
     processed_dir = tmp_path / "processed"
@@ -401,8 +402,11 @@ def test_process_image(
     with Image.open(processed_file) as processed_image:
         if operation == "resize":
             assert processed_image.size == (50, 30)
-        elif operation == "rotate":
+        if operation == "rotate":
             assert processed_image.size == (60, 100)
+        elif operation == "grayscale":
+            assert processed_image.size == (100, 60)
+            assert processed_image.mode == "L"
 
     assert processed_data["source_image_id"] == source_image_id
 
@@ -428,9 +432,10 @@ def test_process_image(
     [
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
+        ("grayscale", None),
     ]
 )
-def test_processing_image_not_found(operation:str, payload: dict[str, int]) -> None:
+def test_processing_image_not_found(operation:str, payload: dict[str, int] | None) -> None:
     response = client.post(
         f"/images/00000000-0000-4000-8000-000000000000/{operation}",
         json=payload
@@ -472,13 +477,14 @@ def test_rotate_image_invalid_angle() -> None:
     [
         ("resize", {"width": 50, "height": 30}),
         ("rotate", {"angle": 90}),
+        ("grayscale", None),
     ]
 )
 def test_process_image_database_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
-    payload: dict[str, int],
+    payload: dict[str, int] | None,
 ) -> None:
     originals_dir = tmp_path / "originals"
     processed_dir = tmp_path / "processed"

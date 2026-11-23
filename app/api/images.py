@@ -18,6 +18,7 @@ from app.image_processing.resize import resize_image
 from app.models.processed_image import ProcessedImage
 from app.schemas.rotate import RotateRequest
 from app.image_processing.rotate import rotate_image
+from app.image_processing.grayscale import grayscale_image
 
 images_router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -292,3 +293,46 @@ def rotate_image_endpoint(image_id: UUID, request: RotateRequest, db: Session = 
 
     return processed_record
 
+
+@images_router.post(
+    "/images/{image_id}/grayscale", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED
+)
+def grayscale_image_endpoint(image_id: UUID, db: Session = Depends(get_db)):
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    source_path = STORAGE_DIR / image.stored_filename
+    extension = source_path.suffix
+    processed_id = str(uuid4())
+    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
+
+    try:
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        grayscale_image(source_path, output_path)
+        file_size = output_path.stat().st_size
+    except OSError:
+        logger.exception("Failed to convert image to grayscale: %s", output_path)
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to convert image to grayscale")
+
+    processed_record = ProcessedImage(
+        id=UUID(processed_id),
+        source_image_id=image_id,
+        stored_filename=output_path.name,
+        width=image.width,
+        height=image.height,
+        format=image.format,
+        file_size=file_size,
+    )
+
+    try:
+        db.add(processed_record)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to save processed image record: %s", output_path)
+        db.rollback()
+        cleanup_file(output_path)
+        raise HTTPException(status_code=500, detail="Failed to save processed image record")
+
+    return processed_record
