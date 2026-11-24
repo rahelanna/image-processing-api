@@ -9,7 +9,7 @@ def crop_image(
         left: int,
         width: int,
         height: int,
-) -> None:
+) -> tuple[int, int]:
     with Image.open(image_path) as image:
         image_format = image.format
 
@@ -19,3 +19,5 @@ def crop_image(
         cropped_image = image.crop((left, top, left + width, top + height))
 
     cropped_image.save(output_path, format=image_format)
+
+    return cropped_image.size

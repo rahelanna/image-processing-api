@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib import request
 from uuid import uuid4, UUID
 import shutil
 import logging
@@ -22,6 +23,7 @@ from app.schemas.rotate import RotateRequest
 from app.image_processing.rotate import rotate_image
 from app.image_processing.grayscale import grayscale_image
 from app.image_processing.crop import crop_image
+from app.services.image_processing import process_image, cleanup_file
 
 images_router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -43,11 +45,6 @@ EXTENSIONS = {
     "WEBP": ".webp",
 }
 
-def cleanup_file(file_path: Path) -> None:
-    try:
-        file_path.unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to delete file: %s", file_path)
 
 @images_router.post("/images", status_code=status.HTTP_201_CREATED)
 def upload_image(
@@ -122,7 +119,7 @@ def upload_image(
         cleanup_file(storage_path)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save image record")
     return {
-        "image_id": image_id,
+        "id": image_id,
         "original_filename": file.filename,
         "stored_filename": stored_filename,
         "metadata": metadata,
@@ -213,179 +210,70 @@ def delete_image(image_id: UUID, db: Session = Depends(get_db)):
 
 @images_router.post("/images/{image_id}/resize", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED)
 def resize_image_endpoint(image_id: UUID, request: ResizeRequest, db: Session = Depends(get_db)):
-    image = db.get(ImageModel, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
 
-    source_path = STORAGE_DIR / image.stored_filename
-    extension = source_path.suffix
-    processed_id = str(uuid4())
-
-    image_path = PROCESSED_DIR / f"{processed_id}{extension}"
-
-    try:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        resize_image(source_path, image_path, request.width, request.height)
-        file_size = image_path.stat().st_size
-    except OSError:
-        logger.exception("Failed to resize image: %s", image_path)
-        cleanup_file(image_path)
-        raise HTTPException(status_code=500, detail="Failed to resize image")
-
-    processed_record = ProcessedImage(
-        id=UUID(processed_id),
-        source_image_id=image_id,
-        stored_filename=image_path.name,
-        width=request.width,
-        height=request.height,
-        format=image.format,
-        file_size=file_size,
+    return process_image(
+        image_id, db,
+        STORAGE_DIR,
+        PROCESSED_DIR,
+        operation=lambda source, output: resize_image(
+            source,
+            output,
+            request.width,
+            request.height,
+        )
     )
-
-    try:
-        db.add(processed_record)
-        db.commit()
-    except SQLAlchemyError:
-        logger.exception("Failed to save processed image record: %s", image_path)
-        db.rollback()
-        cleanup_file(image_path)
-        raise HTTPException(status_code=500, detail="Failed to save processed image record")
-
-    return processed_record
 
 
 @images_router.post(
     "/images/{image_id}/rotate", status_code=status.HTTP_201_CREATED, response_model=ProcessedImageResponse)
 def rotate_image_endpoint(image_id: UUID, request: RotateRequest, db: Session = Depends(get_db)):
-    image = db.get(ImageModel, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
 
-    source_path = STORAGE_DIR / image.stored_filename
-    extension = source_path.suffix
-    processed_id = str(uuid4())
-    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
-
-    try:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        width, height = rotate_image(source_path, output_path, request.angle)
-        file_size = output_path.stat().st_size
-    except OSError:
-        logger.exception("Failed to rotate image: %s", output_path)
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to rotate image")
-
-    processed_record = ProcessedImage(
-        id=UUID(processed_id),
-        source_image_id=image_id,
-        stored_filename=output_path.name,
-        width=width,
-        height=height,
-        format=image.format,
-        file_size=file_size,
+    return process_image(
+        image_id,
+        db,
+        STORAGE_DIR,
+        PROCESSED_DIR,
+        operation=lambda source, output: rotate_image(
+            source,
+            output,
+            request.angle,
+        )
     )
-
-    try:
-        db.add(processed_record)
-        db.commit()
-    except SQLAlchemyError:
-        logger.exception("Failed to save processed image record: %s", output_path)
-        db.rollback()
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to save processed image record")
-
-    return processed_record
 
 
 @images_router.post(
     "/images/{image_id}/grayscale", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED
 )
 def grayscale_image_endpoint(image_id: UUID, db: Session = Depends(get_db)):
-    image = db.get(ImageModel, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
 
-    source_path = STORAGE_DIR / image.stored_filename
-    extension = source_path.suffix
-    processed_id = str(uuid4())
-    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
-
-    try:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        grayscale_image(source_path, output_path)
-        file_size = output_path.stat().st_size
-    except OSError:
-        logger.exception("Failed to convert image to grayscale: %s", output_path)
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to convert image to grayscale")
-
-    processed_record = ProcessedImage(
-        id=UUID(processed_id),
-        source_image_id=image_id,
-        stored_filename=output_path.name,
-        width=image.width,
-        height=image.height,
-        format=image.format,
-        file_size=file_size,
+    return process_image(
+        image_id,
+        db,
+        STORAGE_DIR,
+        PROCESSED_DIR,
+        grayscale_image,
     )
-
-    try:
-        db.add(processed_record)
-        db.commit()
-    except SQLAlchemyError:
-        logger.exception("Failed to save processed image record: %s", output_path)
-        db.rollback()
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to save processed image record")
-
-    return processed_record
 
 
 @images_router.post(
     "/images/{image_id}/crop", response_model=ProcessedImageResponse, status_code=status.HTTP_201_CREATED
 )
 def crop_image_endpoint(image_id: UUID, request: CropRequest, db: Session = Depends(get_db)):
-    image = db.get(ImageModel, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
 
-    source_path = STORAGE_DIR / image.stored_filename
-    extension = source_path.suffix
-    processed_id = str(uuid4())
-    output_path = PROCESSED_DIR / f"{processed_id}{extension}"
-    try:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        crop_image(source_path, output_path, request.top, request.left, request.width, request.height)
-        file_size = output_path.stat().st_size
-    except OSError:
-        logger.exception("Failed to crop image: %s", output_path)
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to crop image")
-    except ValueError as exc:
-        logger.exception("Failed to crop image: %s", output_path)
-        cleanup_file(output_path)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    processed_record = ProcessedImage(
-        id=UUID(processed_id),
-        source_image_id=image_id,
-        stored_filename=output_path.name,
-        width=request.width,
-        height=request.height,
-        format=image.format,
-        file_size=file_size,
+    return process_image(
+        image_id,
+        db,
+        STORAGE_DIR,
+        PROCESSED_DIR,
+        operation=lambda source, output: crop_image(
+            source,
+            output,
+            request.top,
+            request.left,
+            request.width,
+            request.height,
+        )
     )
-
-    try:
-        db.add(processed_record)
-        db.commit()
-    except SQLAlchemyError:
-        logger.exception("Failed to save processed image record: %s", output_path)
-        db.rollback()
-        cleanup_file(output_path)
-        raise HTTPException(status_code=500, detail="Failed to save processed image record")
-
-    return processed_record
 
 
 @images_router.get(

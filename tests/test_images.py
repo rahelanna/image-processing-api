@@ -17,7 +17,6 @@ from app.models import processed_image
 from app.models.image import Image as ImageModel
 from app.models.processed_image import ProcessedImage
 
-
 client = TestClient(app)
 
 @pytest.mark.parametrize(
@@ -65,11 +64,11 @@ def test_upload_valid_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tes
     assert payload["metadata"]["height"] == 10
     assert payload["metadata"]["format"] == "PNG"
     assert stored_file.exists()
-    assert "image_id" in payload
+    assert "id" in payload
     assert payload["metadata"]["file_size"] > 0
 
     with Session(test_database) as session:
-        stored_image = session.get(ImageModel, UUID(payload["image_id"]))
+        stored_image = session.get(ImageModel, UUID(payload["id"]))
 
         assert stored_image is not None
         assert stored_image.original_filename == "test.png"
@@ -197,7 +196,7 @@ def test_get_images(
     assert images[0]["original_filename"] == "test.png"
     assert images[0]["width"] == 10
     assert images[0]["height"] == 10
-    assert images[0]["id"] == post_response.json()["image_id"]
+    assert images[0]["id"] == post_response.json()["id"]
 
 
 def test_get_image_by_id(
@@ -213,7 +212,7 @@ def test_get_image_by_id(
         "/images",
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
-    image_id = post_response.json()["image_id"]
+    image_id = post_response.json()["id"]
     assert post_response.status_code == 201
 
 
@@ -258,7 +257,7 @@ def test_delete_image(
 
     assert post_response.status_code == 201
     image_data = post_response.json()
-    image_id = image_data["image_id"]
+    image_id = image_data["id"]
     stored_file = originals_dir / image_data["stored_filename"]
     assert stored_file.exists()
 
@@ -309,7 +308,7 @@ def test_delete_image_without_processed_images(
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
     assert post_response.status_code == 201
-    image_id = post_response.json()["image_id"]
+    image_id = post_response.json()["id"]
     delete_response = client.delete(f"/images/{image_id}")
     assert delete_response.status_code == 204
     assert list(tmp_path.iterdir()) == []
@@ -337,7 +336,7 @@ def test_delete_image_database_failure(
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
     image_data = post_response.json()
-    image_id = image_data["image_id"]
+    image_id = image_data["id"]
     stored_file = tmp_path / image_data["stored_filename"]
 
     assert stored_file.exists()
@@ -385,7 +384,7 @@ def test_process_image(
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
     assert post_response.status_code == 201
-    source_image_id = post_response.json()["image_id"]
+    source_image_id = post_response.json()["id"]
     stored_filename = post_response.json()["stored_filename"]
     original_file = originals_dir / stored_filename
 
@@ -495,7 +494,7 @@ def test_crop_image_out_of_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         files={"file": ("test.png", buffer.getvalue(), "image/png")}
     )
     assert post_response.status_code == 201
-    source_image_id = post_response.json()["image_id"]
+    source_image_id = post_response.json()["id"]
     stored_filename = post_response.json()["stored_filename"]
     original_file = originals_dir / stored_filename
     assert original_file.exists()
@@ -540,7 +539,7 @@ def test_process_image_database_failure(
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
     assert post_response.status_code == 201
-    image_id = post_response.json()["image_id"]
+    image_id = post_response.json()["id"]
     stored_file = originals_dir / post_response.json()["stored_filename"]
 
     def failing_commit(self: Session) -> None:
@@ -571,7 +570,7 @@ def test_download_processed_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     )
     assert post_response.status_code == 201
     image_data = post_response.json()
-    image_id = image_data["image_id"]
+    image_id = image_data["id"]
     stored_file = originals_dir / image_data["stored_filename"]
     assert stored_file.exists()
 
@@ -614,7 +613,7 @@ def test_download_processed_image_file_not_found(tmp_path: Path, monkeypatch: py
         files={"file": ("test.png", buffer.getvalue(), "image/png")},
     )
     assert post_response.status_code == 201
-    image_id = post_response.json()["image_id"]
+    image_id = post_response.json()["id"]
     stored_file = originals_dir / post_response.json()["stored_filename"]
     assert stored_file.exists()
 
