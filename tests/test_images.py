@@ -555,3 +555,77 @@ def test_process_image_database_failure(
     assert resized_response.json() == {"detail": "Failed to save processed image record"}
     assert list(processed_dir.iterdir()) == []
     assert stored_file.exists()
+
+
+def test_download_processed_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_database: Engine) -> None:
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")}
+    )
+    assert post_response.status_code == 201
+    image_data = post_response.json()
+    image_id = image_data["image_id"]
+    stored_file = originals_dir / image_data["stored_filename"]
+    assert stored_file.exists()
+
+    processed_image_response = client.post(f"/images/{image_id}/grayscale")
+    assert processed_image_response.status_code == 201
+    processed_image_data = processed_image_response.json()
+    processed_image_id = processed_image_data["id"]
+    processed_file = processed_dir / processed_image_data["stored_filename"]
+    assert processed_file.exists()
+
+
+    download_response = client.get(f"/images/processed/{processed_image_id}/download")
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"] == "image/png"
+
+    downloaded_buffer = BytesIO(download_response.content)
+
+    with Image.open(downloaded_buffer) as downloaded_image:
+        assert downloaded_image.size == (100, 100)
+        assert downloaded_image.mode == "L"
+
+
+def test_download_processed_image_not_found() -> None:
+    get_response = client.get(f"/images/processed/00000000-0000-4000-8000-000000000000/download")
+
+    assert get_response.status_code == 404
+    assert get_response.json() == {"detail": "Processed image not found"}
+
+
+def test_download_processed_image_file_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    originals_dir = tmp_path / "originals"
+    processed_dir = tmp_path / "processed"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    monkeypatch.setattr(images_module, "PROCESSED_DIR", processed_dir)
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    image_id = post_response.json()["image_id"]
+    stored_file = originals_dir / post_response.json()["stored_filename"]
+    assert stored_file.exists()
+
+    processed_image_response = client.post(f"/images/{image_id}/grayscale")
+    assert processed_image_response.status_code == 201
+    processed_image_id = processed_image_response.json()["id"]
+    stored_processed_file = processed_dir / processed_image_response.json()["stored_filename"]
+    assert stored_processed_file.exists()
+
+    stored_processed_file.unlink()
+
+    download_response = client.get(f"/images/processed/{processed_image_id}/download")
+    assert download_response.status_code == 404
+    assert download_response.json() == {"detail": "Processed image file not found"}
