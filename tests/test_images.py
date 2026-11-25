@@ -628,3 +628,53 @@ def test_download_processed_image_file_not_found(tmp_path: Path, monkeypatch: py
     download_response = client.get(f"/images/processed/{processed_image_id}/download")
     assert download_response.status_code == 404
     assert download_response.json() == {"detail": "Processed image file not found"}
+
+
+def test_download_original_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    originals_dir = tmp_path / "originals"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    image_id = post_response.json()["id"]
+
+    get_response = client.get(f"/images/{image_id}/download")
+    assert get_response.status_code == 200
+    assert get_response.headers["content-type"] == "image/png"
+
+    download_buffer = BytesIO(get_response.content)
+    with Image.open(download_buffer) as downloaded_image:
+        assert downloaded_image.size == (100, 100)
+        assert downloaded_image.mode == "RGB"
+
+
+def test_download_original_image_not_found() -> None:
+    get_response = client.get("/images/00000000-0000-4000-8000-000000000000/download")
+    assert get_response.status_code == 404
+    assert get_response.json() == {"detail": "Image not found"}
+
+
+def test_download_original_image_file_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    originals_dir = tmp_path / "originals"
+    monkeypatch.setattr(images_module, "STORAGE_DIR", originals_dir)
+    image = Image.new("RGB", (100, 100), color="red")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    post_response = client.post(
+        "/images",
+        files={"file": ("test.png", buffer.getvalue(), "image/png")},
+    )
+    assert post_response.status_code == 201
+    image_id = post_response.json()["id"]
+    stored_file = originals_dir / post_response.json()["stored_filename"]
+    assert stored_file.exists()
+    stored_file.unlink()
+
+    get_response = client.get(f"/images/{image_id}/download")
+    assert get_response.status_code == 404
+    assert get_response.json() == {"detail": "Original image file not found"}

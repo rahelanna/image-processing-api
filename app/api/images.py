@@ -290,3 +290,16 @@ def download_processed_image_endpoint(processed_id: UUID, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Processed image file not found")
 
     return FileResponse(path=file_path, media_type=f"image/{image.format.lower()}")
+
+@images_router.get(
+    "/images/{image_id}/download", status_code=status.HTTP_200_OK
+)
+def download_original_image_endpoint(image_id: UUID, db: Session = Depends(get_db)) -> FileResponse:
+    image = db.get(ImageModel, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    file_path = STORAGE_DIR / image.stored_filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Original image file not found")
+    return FileResponse(path=file_path, media_type=f"image/{image.format.lower()}")
